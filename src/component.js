@@ -1,9 +1,10 @@
 /* @flow */
 
-import { getLogger, getClientToken, getCorrelationID, getPayPalAPIDomain, getVault, getMerchantID, getFundingEligibility, getGraphQLFundingEligibility } from '@paypal/sdk-client/src';
+import { getLogger, getClientToken, getCorrelationID, getPayPalAPIDomain, getVault, getMerchantID, getFundingEligibility, getGraphQLFundingEligibility, isChildWindow } from '@paypal/sdk-client/src';
 import { FPTI_KEY } from '@paypal/sdk-constants/src';
 import { ZalgoPromise } from 'zalgo-promise/src';
 import { uniqueID } from 'belter/src';
+import { destroy as zoidDestroy } from 'zoid/src';
 
 // toodoo unvendor this when braintree-web is updated
 import btClient from '../vendor/braintree-web/client';
@@ -11,6 +12,8 @@ import hostedFields from '../vendor/braintree-web/hosted-fields';
 
 import contingencyFlow from './contingency-flow';
 import type { HostedFieldsHandler } from './types';
+
+const MSP_ENABLED = true;  // flag whether msp feature is enabled
 
 const TESTING_CONFIGURATION = {
   assetsUrl: 'https://assets.braintreegateway.com',
@@ -27,8 +30,8 @@ const LIABILITYSHIFTED_MAPPER = {
 
 const uccEligibilityFields = `
   card {
-      eligible 
-      branded 
+      eligible
+      branded
   }
 `;
 
@@ -54,6 +57,7 @@ function createSubmitHandler (hostedFieldsInstance, orderIdFunction) : Function 
     paymentInProgress = true;
 
     return orderIdFunction().then((orderId) => {
+      logger.info('HOSTEDFIELDS_SUBMIT');
       logger.track({
         [ FPTI_KEY.STATE ]:              'CARD_PAYMENT_FORM',
         [ FPTI_KEY.TRANSITION ]:         'process_receive_order',
@@ -72,6 +76,8 @@ function createSubmitHandler (hostedFieldsInstance, orderIdFunction) : Function 
         }
 
         const url = `${ err.links.find(link => link.rel === '3ds-contingency-resolution').href  }`;
+
+        logger.info('HOSTEDFIELDS_3DS');
         return contingencyFlow.start(url);
       }).then((payload) => {
         // does contingency flow give a payload?
@@ -128,6 +134,11 @@ type OptionsType = {|
 
 export const HostedFields = {
   isEligible() : boolean {
+    const clientToken = getClientToken();
+
+    if (!clientToken) {
+      return false;
+    }
     // check whether getFundingEligibility isFulfilled, otherwise, use the default;
     if (fundingEligibility && fundingEligibility.card) {
       return Boolean(fundingEligibility.card.eligible && !fundingEligibility.card.branded);
@@ -152,7 +163,7 @@ export const HostedFields = {
 
     return getUccEligibility.then((eligibilityData) => {
       if (!eligibilityData || !eligibilityData.card || !eligibilityData.card.eligible || eligibilityData.card.branded) {
-        logger.warn(`HOSTEDFIELDS_NOT_ELIGIBLE_FOR_MSP`);
+        logger.warn('HOSTEDFIELDS_NOT_ELIGIBLE');
         // inEligible
         return ZalgoPromise.reject(new Error('hosted fields are not eligible.'));
       }
@@ -216,7 +227,7 @@ export const HostedFields = {
             });
           });
         }
-
+        logger.info('HOSTEDFIELDS_RENDERED');
         hosted_payment_session_id = uniqueID();
         logger.track({
           comp:                                 'hostedpayment',
@@ -241,11 +252,17 @@ export const HostedFields = {
 };
 
 export function setupHostedFields() : Function {
+  // not run inside zoid
+  if (isChildWindow()) {
+    return;
+  }
+
   const merchantId = getMerchantID();
   const originalFundingEligibility = getFundingEligibility();
 
   // if msp, kick off eligibility call with multiple merchant ids to GQL
-  if (merchantId && merchantId.length > 1) {
+  if (MSP_ENABLED && merchantId && merchantId.length > 1) {
+    getLogger().info('HOSTEDFIELDS_MSP_GETFUNDINGELIGIBILITY');
     getUccEligibility = getGraphQLFundingEligibility(uccEligibilityFields);
   } else {
     getUccEligibility = ZalgoPromise.resolve(originalFundingEligibility);
@@ -255,4 +272,8 @@ export function setupHostedFields() : Function {
     fundingEligibility = data;
   });
 
+}
+
+export function destroy() {
+  zoidDestroy();
 }
